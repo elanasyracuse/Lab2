@@ -14,7 +14,7 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-st.title("💬 Lab 3A – Kid-Friendly Chatbot (20-exchange buffer + topic follow-ups)")
+st.title("💬 Lab 3A – Kid-Friendly Chatbot")
 
 # ---- Config ----
 MODEL = "gpt-4o-mini"
