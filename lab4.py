@@ -1,51 +1,35 @@
-# lab4.py  — Lab 4 Part A (ChromaDB + PDF ingestion + quick search)
-
-import os
-import glob
-import textwrap
-from io import BytesIO
-
+# lab4_simple.py — Lab 4 Part A (ChromaDB + PDF ingestion + quick search)
+import os, glob
 import streamlit as st
 from pypdf import PdfReader
 
-# ---------- SQLite shim (MUST be before importing chromadb) ----------
+# ---------- SQLite shim (must be before chromadb import) ----------
 try:
-    import pysqlite3  # ships a modern SQLite >= 3.35
-    import sys
+    import pysqlite3, sys
     sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 except Exception:
-    # If the shim isn't available, Chroma will raise a clear error later.
     pass
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------
 
-# Vector DB
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 
 # ================================
-# Config / Keys
+# Page setup & keys
 # ================================
-st.set_page_config(
-    page_title="Lab 4 ▢ ChromaDB (Part A)",
-    page_icon=":material/folder:",
-    layout="wide",
-)
-st.title("Lab 4 ▢ Part A: Build a ChromaDB Collection")
+st.set_page_config(page_title="Lab 4 — ChromaDB (Simple)", page_icon="📄", layout="centered")
+st.markdown("## Lab 4 📒 ChromaDB")
+st.caption("PDFs are read from `pdfs/*.pdf`")
 
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-
 if not OPENAI_KEY:
-    st.warning(
-        "OpenAI API key missing. Add OPENAI_API_KEY to .streamlit/secrets.toml or your environment.",
-        icon="⚠️",
-    )
+    st.warning("OpenAI API key missing. Set `OPENAI_API_KEY` in secrets or env.", icon="⚠️")
 
 # ================================
-# Helper functions
+# Helpers
 # ================================
 def read_pdf_text(path: str) -> str:
-    """Extract text from a PDF using pypdf. Empty pages are handled gracefully."""
     with open(path, "rb") as f:
         reader = PdfReader(f)
         pieces = []
@@ -57,9 +41,6 @@ def read_pdf_text(path: str) -> str:
         return "\n".join(pieces).strip()
 
 def chunk_text(text: str, max_chars: int = 1400, overlap: int = 150):
-    """
-    Simple paragraph-based chunker to keep embedding calls small.
-    """
     paras = [p.strip() for p in text.split("\n") if p.strip()]
     chunks, cur = [], ""
     for p in paras:
@@ -71,7 +52,6 @@ def chunk_text(text: str, max_chars: int = 1400, overlap: int = 150):
                 tail = cur[-overlap:] if overlap > 0 else ""
                 cur = (tail + "\n" + p).strip()
             else:
-                # A single mega-paragraph—hard cut
                 chunks.append(p[:max_chars])
                 cur = p[max(0, max_chars - overlap):max_chars - overlap + max_chars]
     if cur:
@@ -79,67 +59,41 @@ def chunk_text(text: str, max_chars: int = 1400, overlap: int = 150):
     return chunks
 
 def get_client(persist_dir: str = ".chromadb"):
-    """Create a Chroma client that persists to disk so hot-reloads don’t wipe data."""
     return chromadb.Client(Settings(persist_directory=persist_dir))
 
 def get_collection(client, name: str, api_key: str):
-    embedder = OpenAIEmbeddingFunction(
-        api_key=api_key,
-        model_name="text-embedding-3-small",
-    )
-    return client.get_or_create_collection(
-        name=name,
-        embedding_function=embedder,
-    )
+    embedder = OpenAIEmbeddingFunction(api_key=api_key, model_name="text-embedding-3-small")
+    return client.get_or_create_collection(name=name, embedding_function=embedder)
 
-def build_or_refresh_collection(pdf_glob: str = "pdfs/*.pdf"):
-    """
-    Build (or refresh) the collection from all PDFs under pdf_glob.
-    Safe to click multiple times—duplicates are avoided with stable IDs.
-    """
+def build_collection(pdf_glob: str = "pdfs/*.pdf"):
     client = get_client()
     coll = get_collection(client, "Lab4Collection", OPENAI_KEY)
 
     pdf_paths = sorted(glob.glob(pdf_glob))
     if not pdf_paths:
-        st.info("No PDFs found. Put your files in the `pdfs/` folder.", icon="ℹ️")
-        return coll, 0
+        return coll, 0, "No PDFs found in `pdfs/`."
 
-    to_add_ids, to_add_docs, to_add_metas = [], [], []
-
+    ids, docs, metas = [], [], []
     for path in pdf_paths:
         fname = os.path.basename(path)
         text = read_pdf_text(path)
         if not text:
             continue
-        chunks = chunk_text(text)
-        for idx, ch in enumerate(chunks):
-            # Deterministic, file-based id so re-runs won’t duplicate
-            doc_id = f"{fname}::chunk-{idx}"
-            to_add_ids.append(doc_id)
-            to_add_docs.append(ch)
-            to_add_metas.append({"source": fname, "chunk": idx})
+        for i, ch in enumerate(chunk_text(text)):
+            ids.append(f"{fname}::chunk-{i}")
+            docs.append(ch)
+            metas.append({"source": fname, "chunk": i})
 
-    # Add in batches; if duplicates exist, fall back to per-item add.
     added = 0
-    batch = 512
-    for start in range(0, len(to_add_ids), batch):
-        end = start + batch
+    for start in range(0, len(ids), 256):
+        end = start + 256
         try:
-            coll.add(
-                ids=to_add_ids[start:end],
-                documents=to_add_docs[start:end],
-                metadatas=to_add_metas[start:end],
-            )
+            coll.add(ids=ids[start:end], documents=docs[start:end], metadatas=metas[start:end])
             added += (end - start)
         except Exception:
-            for i in range(start, end):
+            for j in range(start, end):
                 try:
-                    coll.add(
-                        ids=[to_add_ids[i]],
-                        documents=[to_add_docs[i]],
-                        metadatas=[to_add_metas[i]],
-                    )
+                    coll.add(ids=[ids[j]], documents=[docs[j]], metadatas=[metas[j]])
                     added += 1
                 except Exception:
                     pass
@@ -149,42 +103,63 @@ def build_or_refresh_collection(pdf_glob: str = "pdfs/*.pdf"):
     except Exception:
         pass
 
-    return coll, added
+    return coll, added, None
+
+# --- NEW: keep the collection once per app run in session_state ---
+def ensure_collection_in_session():
+    if "Lab4_vectorDB" not in st.session_state:
+        client = get_client()
+        st.session_state["Lab4_vectorDB"] = get_collection(client, "Lab4Collection", OPENAI_KEY)
+    return st.session_state["Lab4_vectorDB"]
 
 # ================================
-# Sidebar
+# UI
 # ================================
-with st.sidebar:
-    st.subheader("Ingestion")
-    st.caption("PDFs are read from `pdfs/*.pdf`.")
-    if st.button("Build / Refresh collection", type="primary", use_container_width=True):
-        coll, added = build_or_refresh_collection()
-        st.session_state["Lab4_coll_ready"] = True
+col_build, col_info = st.columns([1, 2])
+with col_build:
+    if st.button("📚 Build / Refresh collection", use_container_width=True, type="primary"):
+        coll, added, msg = build_collection()
+        if msg:
+            st.info(msg)
+        # store for this run
+        st.session_state["Lab4_vectorDB"] = coll
         st.success(f"Collection ready. Added {added} chunks.")
-    st.divider()
-    st.subheader("Debug")
-    if st.button("Count vectors"):
-        coll = get_collection(get_client(), "Lab4Collection", OPENAI_KEY)
-        st.info(f"Vector count: {coll.count()}")
 
-# ================================
-# Main UI: quick search
-# ================================
-st.header("Quick test query")
-query = st.text_input("Enter a query", value="data mining")
-k = st.slider("Results", 1, 10, 3)
+with col_info:
+    coll = ensure_collection_in_session()
+    try:
+        st.write(f"**Current vector count:** {coll.count()}")
+    except Exception:
+        st.write("**Current vector count:** 0")
 
-if st.button("Search"):
-    coll = get_collection(get_client(), "Lab4Collection", OPENAI_KEY)
-    res = coll.query(query_texts=[query], n_results=k)
-    docs = res.get("documents", [[]])[0]
-    metas = res.get("metadatas", [[]])[0]
-    st.subheader("Top matches")
-    if not docs:
-        st.write("No matches yet—try building the collection from the sidebar.")
+st.divider()
+st.markdown("### Quick search (prints the top 3 document names)")
+
+q = st.text_input("Enter a query", value="data mining")
+if st.button("🔎 Search", use_container_width=True) and q.strip():
+    coll = ensure_collection_in_session()
+    try:
+        # ask for a few more results to dedupe down to 3 unique filenames
+        res = coll.query(query_texts=[q.strip()], n_results=10)
+        metas = res.get("metadatas", [[]])[0]
+    except Exception as e:
+        metas = []
+        st.error(f"Search failed: {e}")
+
+    # keep first occurrence of each filename in ranked order
+    ordered_unique_files = []
+    seen = set()
+    for m in metas:
+        name = m.get("source", "unknown")
+        if name not in seen:
+            ordered_unique_files.append(name)
+            seen.add(name)
+        if len(ordered_unique_files) == 3:
+            break
+
+    if not ordered_unique_files:
+        st.info("No matches yet. If this is a fresh run, click **Build / Refresh collection**.")
     else:
-        for i, (d, m) in enumerate(zip(docs, metas), start=1):
-            source = m.get("source", "unknown")
-            chunk_i = m.get("chunk", "?")
-            with st.expander(f"{i}. {source}  (chunk {chunk_i})", expanded=False):
-                st.write(textwrap.shorten(d, width=900, placeholder=" …"))
+        st.markdown("**Top 3 documents**")
+        for i, fname in enumerate(ordered_unique_files, start=1):
+            st.write(f"{i}. {fname}")
