@@ -1,2 +1,7 @@
 streamlit
 openai
+chromadb
+pypdf
+openai
+pysqlite3-binary
+tiktoken
